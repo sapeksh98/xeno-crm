@@ -1,7 +1,19 @@
+import asyncio
+import random
+import httpx
+from datetime import datetime
+
+STATUS_CHAIN = [
+    ("delivered", 0.85, (2, 5)),
+    ("opened",    0.80, (5, 15)),
+    ("read",      0.90, (3, 8)),
+    ("clicked",   0.25, (10, 30)),
+    ("purchased", 0.30, (15, 45)),
+]
+
 async def simulate_delivery(communication_id: int, crm_receipt_url: str):
     for status, probability, (min_delay, max_delay) in STATUS_CHAIN:
 
-        # Random outcome
         if random.random() > probability:
             for attempt in range(3):
                 try:
@@ -15,10 +27,8 @@ async def simulate_delivery(communication_id: int, crm_receipt_url: str):
                     await asyncio.sleep(2 ** attempt)
             return
 
-        # Wait random delay
         await asyncio.sleep(random.uniform(min_delay, max_delay))
 
-        # Send status callback with retries
         for attempt in range(3):
             try:
                 async with httpx.AsyncClient(timeout=60.0) as client:
