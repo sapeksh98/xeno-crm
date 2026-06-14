@@ -19,19 +19,21 @@ export default function CampaignDetail() {
   }, [id])
 
   const fetchData = async () => {
-    try {
-      const [campRes, analyticsRes] = await Promise.all([
-        getCampaign(id),
-        getCampaignAnalytics(id)
-      ])
-      setCampaign(campRes.data)
+  try {
+    const [campRes, analyticsRes] = await Promise.all([
+      getCampaign(id),
+      getCampaignAnalytics(id)
+    ])
+    setCampaign(campRes.data)
+    if (analyticsRes.data?.funnel?.sent > 0) {
       setAnalytics(analyticsRes.data)
-    } catch (err) {
-      console.error(err)
-    } finally {
-      setLoading(false)
     }
+  } catch (err) {
+    console.error(err)
+  } finally {
+    setLoading(false)
   }
+}
 
   const fetchInsights = async () => {
     try {
