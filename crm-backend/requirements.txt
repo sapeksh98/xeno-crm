@@ -6,7 +6,10 @@ psycopg2-binary
 python-dotenv
 httpx
 google-generativeai
-langchain
-langchain-google-genai
 pydantic-settings
 python-multipart
+groq
+langchain==0.3.25
+langchain-core==0.3.65
+langchain-groq==0.3.2
+langchain-google-genai==2.0.10
