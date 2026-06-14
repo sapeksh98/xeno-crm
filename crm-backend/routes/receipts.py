@@ -42,7 +42,7 @@ def receive_receipt(
     new_order = STATUS_ORDER.get(status, 0)
 
     if new_order <= current_order:
-    return {"status": "ignored", "reason": "out of order callback"}
+        return {"status": "ignored", "reason": "out of order callback"}
 
     event = CommunicationEvent(
         communication_id=communication.id,
