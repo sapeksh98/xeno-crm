@@ -1,373 +1,285 @@
-# ⚡ Xeno Mini CRM
+# ⚡ Xeno AI-Native Mini CRM
 
-An AI-powered Customer Relationship Management (CRM) & Marketing Campaign Automation platform. **Xeno Mini CRM** allows businesses to ingest customer data, define marketing goals in natural language, automatically generate targeted campaigns via intelligent AI agents, simulate multi-stage message delivery funnels, and analyze campaign conversion metrics in real-time.
+A marketer types a business goal in plain English. The system finds the right audience, picks the best channel, generates personalized messages, launches the campaign, simulates delivery, and surfaces AI-powered analytics. All in one loop.
+
+**Live Demo:** [https://xeno-crm-gules.vercel.app](https://xeno-crm-gules.vercel.app)
+
+---
+
+## 🌟 What It Does
+
+Instead of filling complex forms and manually writing SQL queries, a marketer simply types:
+> *"Re-engage inactive premium customers in Mumbai who haven't bought in 30 days"*
+
+The AI agent automatically:
+1. **Queries** the customer database using dynamically derived SQL filters.
+2. **Analyzes** historical campaign performance to recommend the best delivery channel.
+3. **Generates** a personalized message template.
+4. **Predicts** full funnel metrics and projected campaign revenue.
+5. **Launches** the campaign and dispatches messages.
+6. **Tracks** message delivery in real-time via asynchronous callbacks.
+7. **Generates** AI-powered post-campaign insights and analytics.
 
 ---
 
 ## 🏗️ System Architecture & Data Flow
 
-Xeno Mini CRM consists of three main components:
+```
+     [ Frontend (Vercel) ]
+               │
+               ▼
+      [ CRM Backend (Render) ] ──────► [ Channel Simulator (Render) ]
+               │                                      │
+               │                                      │ async callbacks
+               ▼                                      │
+     [ PostgreSQL Database ] ◄────────────────────────┘
+```
 
-1. **Frontend**: React (v19) application built with Vite and Tailwind CSS. It leverages Recharts for conversion funnels and Lucide icons for UI elements.
-2. **CRM Backend**: FastAPI web application using SQLModel (SQLite database) and LangChain combined with Groq (Llama 3.1 8B) to run autonomous campaign creation agents.
-3. **Channel Simulator**: A lightweight FastAPI microservice that simulates real-world messaging channels (WhatsApp, SMS, Email). It processes sent campaigns and triggers asynchronous postbacks (webhooks) to simulate status transitions (`queued` → `delivered` → `opened` → `read` → `clicked` → `purchased` or `failed`).
+### Two Separate Services — Intentional Decision
+The **Channel Simulator** is run as a completely isolated microservice from the **CRM Backend**—directly mirroring how real channel delivery works in production (e.g., Twilio, AWS SNS, Meta WhatsApp API). The CRM fires out dispatch requests and processes incoming webhook callbacks. Swapping the simulator for real Twilio/SendGrid APIs is a one-line configuration change.
 
-### 🔄 Data & Communication Flow
+### Callback Loop & State Machine
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User as Marketer
-    participant FE as React Frontend
-    participant BE as FastAPI CRM Backend
-    participant DB as SQLite DB
-    participant AI as LangChain + Groq Agent
-    participant Sim as Channel Simulator
-
-    User->>FE: Enter marketing goal & submit
-    FE->>BE: POST /ai/create-campaign { goal }
-    BE->>AI: Invoke campaign agent with goal
-    Note over AI: Agent calls tools in sequence:<br/>1. query_customers<br/>2. analyze_channel<br/>3. generate_message<br/>4. predict_performance
-    AI-->>BE: Returns campaign draft details & metrics
-    BE->>DB: Save Campaign (status: draft) & link target customers
-    BE-->>FE: Return created campaign draft & predicted metrics
-    FE-->>User: Display campaign preview & predicted funnel
-    
-    User->>FE: Click "Launch Campaign"
-    FE->>BE: POST /campaigns/{id}/launch
-    BE->>DB: Update status to "launched"
-    BE-->>FE: Return launch confirmation
-    
-    User->>FE: Click "Send Messages"
-    FE->>BE: POST /communications/send/{id}
-    Note over BE: Creates Communication queue records<br/>replaces {name} template variables
-    BE->>Sim: POST /send (batch of messages)
-    BE-->>FE: Return sending status
-    
-    Note over Sim: Runs Delivery Loop (async)<br/>Simulates status transitions:<br/>Delivered ➔ Opened ➔ Read ➔ Clicked ➔ Purchased
-    loop Async Status Transitions
-        Sim->>BE: POST /receipts { communicationId, status }
-        BE->>DB: Log status update & calculate actual revenue if purchased
-        BE->>FE: Push status updates (via polling / refresh)
-    end
+```
+  [ Campaign Launch ]
+          │
+          ▼
+  CRM loops through audience
+  POST /send ──► [ Channel Simulator (per customer) ]
+                           │
+                           ▼
+                 Simulator queues async task
+                           │
+                           ▼
+                 State Machine (random delays + probabilities):
+                 QUEUED ──(85%)──► DELIVERED
+                                      │
+                                      ├──► OPENED (80% of delivered)
+                                              │
+                                              └──► READ (90% of opened)
+                                                      │
+                                                      └──► CLICKED (25% of read)
+                                                              │
+                                                              └──► PURCHASED (30% of clicked)
+                           │
+                           ▼
+  POST /receipts ◄─────────┘ (3 retries with exponential backoff)
+          │
+          ▼
+  CRM Backend Receipts handler:
+  - Enforces strict state ordering (e.g., CLICKED cannot arrive before OPENED).
+  - Out-of-order callbacks are silently ignored.
+  - Updates the Analytics dashboard live.
 ```
 
 ---
 
-## 🗄️ Database Architecture & Schema Reference
+## 🛠️ Tech Stack
 
-The CRM backend utilizes SQLModel to manage database tables. When using SQLite, the tables are persisted inside the local `dev.db` file. The primary schemas are defined as follows:
-
-### 1. `Customer` Table
-Stores main profiles of customers.
-*   `id` (*Optional[int]*, Primary Key): Unique identifier.
-*   `name` (*str*): Full name of the customer.
-*   `email` (*str*): Email address.
-*   `phone` (*str*): Phone number with country code.
-*   `city` (*str*): City of residence.
-*   `age` (*int*): Customer age.
-*   `total_spending` (*float*, Default: `0.0`): Accumulated amount spent across all completed orders.
-*   `last_purchase_date` (*Optional[datetime]*, Default: `None`): Timestamp of the last completed order.
-*   `created_at` (*datetime*, Default: `utcnow`): Record creation time.
-
-### 2. `Order` Table
-Tracks individual purchases made by customers.
-*   `id` (*Optional[int]*, Primary Key): Unique identifier.
-*   `customer_id` (*int*, Foreign Key: `customer.id`): Associated customer.
-*   `amount` (*float*): Total order price.
-*   `status` (*str*, Default: `"completed"`): Order state (e.g. `completed`, `returned`).
-*   `ordered_at` (*datetime*, Default: `utcnow`): Timestamp of the order transaction.
-
-### 3. `Campaign` Table
-Defines marketing initiatives.
-*   `id` (*Optional[int]*, Primary Key): Unique identifier.
-*   `name` (*str*): Marketing campaign name.
-*   `goal` (*str*): Original natural language instruction/goal.
-*   `channel` (*str*, Default: `"whatsapp"`): Target messaging medium (`whatsapp`, `sms`, `email`).
-*   `message_template` (*str*): Message copywriting template containing `{name}` placeholder variable.
-*   `filters` (*str*, Default: `"{}"`): JSON string of demographic filters used to compile the target segment.
-*   `status` (*str*, Default: `"draft"`): Lifecycle state (`draft`, `launched`).
-*   `audience_count` (*int*, Default: `0`): Calculated size of the filtered audience list.
-*   `predicted_revenue` (*float*, Default: `0.0`): Estimated revenue calculated by the AI agent.
-*   `actual_revenue` (*float*, Default: `0.0`): Aggregated conversion revenue tracked from successful conversion postbacks.
-*   `created_at` (*datetime*, Default: `utcnow`): Record creation time.
-*   `launched_at` (*Optional[datetime]*): Timestamp indicating when the campaign was launched.
-
-### 4. `CampaignCustomer` Table (Many-to-Many Join Table)
-Links campaigns to their target customer list.
-*   `id` (*Optional[int]*, Primary Key): Unique identifier.
-*   `campaign_id` (*int*, Foreign Key: `campaign.id`): Associated campaign.
-*   `customer_id` (*int*, Foreign Key: `customer.id`): Associated customer.
-
-### 5. `Communication` Table
-Stores logs of individual messages generated and sent out to the simulator.
-*   `id` (*Optional[int]*, Primary Key): Unique identifier.
-*   `campaign_id` (*int*, Foreign Key: `campaign.id`): Associated campaign.
-*   `customer_id` (*int*, Foreign Key: `customer.id`): Recipient customer.
-*   `channel` (*str*): Delivery method (`whatsapp`, `sms`, `email`).
-*   `message` (*str*): Personalized text dispatched (placeholder replaced with customer's first name).
-*   `phone` (*str*): Recipient phone number.
-*   `status` (*str*, Default: `"queued"`): Current status of transmission (`queued`, `delivered`, `failed`, `opened`, `read`, `clicked`, `purchased`).
-*   `sent_at` (*datetime*, Default: `utcnow`): Initial dispatch time.
-*   `updated_at` (*datetime*, Default: `utcnow`): Timestamp of the last status change.
-
-### 6. `CommunicationEvent` Table
-Stores chronological status updates for communications, useful for historical analysis.
-*   `id` (*Optional[int]*, Primary Key): Unique identifier.
-*   `communication_id` (*int*, Foreign Key: `communication.id`): Associated communication.
-*   `status` (*str*): Status state recorded.
-*   `received_at` (*datetime*, Default: `utcnow`): Event receipt timestamp.
+| Layer | Technology |
+| :--- | :--- |
+| **Frontend** | React + Tailwind CSS + Vite (Hosted on Vercel) |
+| **CRM Backend** | FastAPI + SQLModel (Hosted on Render) |
+| **Channel Simulator** | FastAPI + HTTPX (Hosted on Render) |
+| **Database** | PostgreSQL (Render) / SQLite (Local development) |
+| **AI Agent** | LangChain + Groq (`llama-3.1-8b-instant`) |
+| **AI Direct Calls** | Groq SDK (for Insights, Personalization, and Retargeting advice) |
+| **HTTP Client** | HTTPX (handles asynchronous postback delivery receipts) |
 
 ---
 
-## 🤖 AI Campaign Agent Mechanics & Prompts
-
-The autonomous generation flow is coordinated by a LangChain agent using the `llama-3.1-8b-instant` model on Groq. The agent is initialized with a custom system prompt:
+## 🤖 AI Agent Architecture
 
 ```
-You are an AI campaign creation agent for a CRM system.
-When given a marketing goal, you MUST call all 4 tools in order:
-1. tool_query_customers — find the right audience
-2. tool_analyze_channel — pick the best channel
-3. tool_generate_message — write the message template
-4. tool_predict_performance — estimate funnel metrics
-
-After all 4 tools, return a JSON object with EXACTLY these keys:
-{
-  "name": "campaign name based on goal",
-  "goal": "the original goal",
-  "filters": {filters used},
-  "audience_count": <number>,
-  "channel": "whatsapp|sms|email",
-  "message_template": "the message",
-  "predicted_revenue": <number>,
-  "predicted_metrics": {...funnel numbers}
-}
-Return ONLY valid JSON, no markdown, no explanation.
+                 POST /ai/create-campaign
+                           │
+                           ▼
+              LangChain Agent (campaign_agent.py)
+                           │
+    ┌──────────────────────┼──────────────────────┬──────────────────────┐
+    │                      │                      │                      │
+ ┌──┴─────────────────┐ ┌──┴────────────────┐  ┌──┴───────────────┐   ┌──┴──────────────────┐
+ │ Tool 1:            │ │ Tool 2:           │  │ Tool 3:          │   │ Tool 4:             │
+ │ query_customers()  │ │ analyze_channel() │  │ generate_msg()   │   │ predict_perf()      │
+ ├────────────────────┤ ├───────────────────┤  ├──────────────────┤   ├─────────────────────┤
+ │ NL Filters ➔ SQL   │ │ Reads past CTR    │  │ Creates message  │   │ Estimates funnel    │
+ │ to get audience    │ │ metrics to select │  │ template with    │   │ metrics & projected │
+ │ count & sample.    │ │ WhatsApp/SMS/Email│  │ placeholders.    │   │ campaign revenue.   │
+ └────────────────────┘ └───────────────────┘  └──────────────────┘   └─────────────────────┘
 ```
 
-### Agent Tools
-1.  **`tool_query_customers(filters_json)`**: Runs a filter search on SQLite. Supported filter fields: `city`, `min_age`, `max_age`, `min_spending`, `inactive_days`.
-2.  **`tool_analyze_channel(goal)`**: Evaluates performance patterns matching the goal and suggests WhatsApp, SMS, or Email.
-3.  **`tool_generate_message(goal, channel)`**: Creates tailored message copywriting.
-4.  **`tool_predict_performance(audience_count, channel)`**: Models conversion expectations.
+Everything else is powered by **Direct Groq LLM API Calls** ([ai_service.py](file:///C:/Users/LENOVO/Desktop/xeno-crm/crm-backend/services/ai_service.py)):
+*   `generate_insights()` ➔ Analyzes campaign analytics to create a post-campaign AI narrative.
+*   `personalize_message()` ➔ Interpolates custom attributes to create a per-customer personalized message copy.
+*   `generate_retargeting_advice()` ➔ Analyzes performance drops to suggest strategic next steps.
 
-### Additional AI Services
-*   **Insight Engine (`generate_insights`)**: Queries campaign metrics and formats exactly 4 concise performance insights.
-*   **Retargeting Advisor (`generate_retargeting_advice`)**: Evaluates click-to-purchase dropdowns and writes 3 strategic retargeting checklist tasks.
-*   **Personalization (`personalize_message`)**: Dynamically overrides generic parameters with detailed customer properties.
+> **Key Decision:** LangChain is used in exactly one place—campaign creation—because that's the only workflow that genuinely needs dynamic multi-tool orchestration. Everything else uses direct Groq API completions, keeping 95% of the codebase simple, fast, and maintainable.
 
 ---
 
-## 🔌 API Reference Specification
+## 🗄️ Database Schema
 
-### 👥 Customers Routes
-*   **`GET /customers/`**: Get filtered list of customers.
-    *   *Query Parameters*: `city` (str), `min_age` (int), `max_age` (int), `min_spending` (float), `inactive_days` (int), `limit` (int, default=50), `offset` (int, default=0).
-*   **`GET /customers/count`**: Get count of customers matching the filters.
-*   **`GET /customers/{customer_id}`**: Retrieve detailed customer profile.
-*   **`POST /customers/upload`**: Ingest customer data via CSV file uploads.
-    *   *Payload*: Multipart form-data with key `file`.
-
-### 📢 Campaigns Routes
-*   **`GET /campaigns/`**: List all saved campaigns.
-*   **`GET /campaigns/{campaign_id}`**: Get campaign details by ID.
-*   **`POST /campaigns/`**: Manually save a new campaign draft.
-    *   *Request Body*: `CampaignCreate` (JSON).
-*   **`POST /campaigns/{campaign_id}/launch`**: Transition status from `draft` to `launched`.
-*   **`DELETE /campaigns/{campaign_id}`**: Remove a campaign record.
-
-### ✉️ Communications Routes
-*   **`POST /communications/send/{campaign_id}`**: Retrieve target audience from `CampaignCustomer`, build personalized messages, create `Communication` queue records, and dispatch payloads to the simulator.
-
-### 📥 Simulator Receipt Webhook
-*   **`POST /receipts/`**: Update status of an individual communication. Evaluates callback ordering using sequential values.
-    *   *Request Body*: `{"communicationId": int, "status": str}`.
-    *   If status transitions to `purchased`, actual campaign revenue is increased based on `customer.total_spending * 0.1`.
-
-### 📊 Analytics Routes
-*   **`GET /analytics/`**: Returns global statistics (total campaigns, total messages sent, status counts, conversion rates, and total aggregate actual revenue).
-*   **`GET /analytics/{campaign_id}`**: Returns specific campaign metrics (sent, delivered, opened, read, clicked, purchased totals, conversion rates, and comparison between predicted vs. actual revenue).
-
-### 🤖 AI Routes
-*   **`POST /ai/create-campaign`**: Initiate the LangChain tool agent loop using a marketing goal.
-    *   *Request Body*: `{"goal": str}`.
-*   **`GET /ai/insights/{campaign_id}`**: Uses Groq to generate 4 campaign analysis insights and 3 retargeting tips.
-*   **`POST /ai/personalize`**: Generates a customized message draft.
-    *   *Request Body*: `{"template": str, "customer": dict}`.
+*   **`customers`** ➔ `id`, `name`, `email`, `phone`, `city`, `age`, `total_spending`, `last_purchase_date`
+*   **`orders`** ➔ `id`, `customer_id`, `amount`, `status`, `ordered_at`
+*   **`campaigns`** ➔ `id`, `name`, `goal`, `channel`, `message_template`, `filters` (JSON), `status`, `audience_count`, `predicted_revenue`, `actual_revenue`, `launched_at`
+*   **`campaign_customers`** ➔ `id`, `campaign_id`, `customer_id`
+*   **`communications`** ➔ `id`, `campaign_id`, `customer_id`, `channel`, `message`, `status`, `sent_at`
+*   **`communication_events`** ➔ `id`, `communication_id`, `status`, `received_at` *(append-only log)*
 
 ---
 
-## ⚙️ Environment Variables Reference
+## 📂 Project Structure
 
-| Variable Name | Component | Required For | Default Value | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `DATABASE_URL` | `crm-backend` | SQLite Connection | `sqlite:///./dev.db` | File path endpoint to store DB tables. |
-| `GROQ_API_KEY` | `crm-backend` | LLM API Requests | *(None)* | API authorization key for Groq inference. |
-| `CHANNEL_SIMULATOR_URL` | `crm-backend` | HTTP Dispatches | `http://localhost:8001` | Destination host where simulator listens. |
-| `CRM_RECEIPT_URL` | `channel-simulator` | Status Webhooks | `http://localhost:8000/receipts/` | Target endpoint for posting status updates. |
-| `VITE_API_URL` | `frontend` | Axios API Client | `http://localhost:8000` | Target URL where CRM backend runs. |
+```
+xeno-crm/
+├── crm-backend/
+│   ├── main.py
+│   ├── config.py
+│   ├── database.py
+│   ├── models/
+│   │   ├── customer.py
+│   │   ├── campaign.py
+│   │   └── communication.py
+│   ├── routes/
+│   │   ├── customers.py
+│   │   ├── campaigns.py
+│   │   ├── communications.py
+│   │   ├── receipts.py
+│   │   ├── analytics.py
+│   │   └── ai.py
+│   ├── services/
+│   │   ├── campaign_agent.py   ← LangChain lives here only
+│   │   ├── ai_service.py       ← Direct Groq calls
+│   │   └── seed.py
+│   ├── tools/
+│   │   ├── customer_tool.py
+│   │   ├── channel_tool.py
+│   │   ├── message_tool.py
+│   │   └── predict_tool.py
+│   └── requirements.txt
+│
+├── channel-simulator/
+│   ├── main.py
+│   ├── simulator.py
+│   ├── config.py
+│   └── requirements.txt
+│
+└── frontend/
+    ├── src/
+    │   ├── pages/
+    │   │   ├── Landing.jsx
+    │   │   ├── Home.jsx
+    │   │   ├── Campaigns.jsx
+    │   │   ├── CampaignDetail.jsx
+    │   │   ├── Customers.jsx
+    │   │   └── Analytics.jsx
+    │   ├── components/
+    │   │   └── Navbar.jsx
+    │   └── lib/
+    │       └── api.js
+    └── package.json
+```
 
 ---
 
-## 🛠️ Step-by-Step Installation & Setup
+## 💻 Running Locally
 
 ### Prerequisites
-*   **Python 3.10+**
-*   **Node.js 18+** (with NPM)
-*   A **Groq API Key** (obtained from [Groq Console](https://console.groq.com/))
+*   **Python 3.11+**
+*   **Node.js** (with NPM)
 
----
-
-### Step 1: Run the FastAPI CRM Backend
-
-1. Navigate to the backend directory:
-   ```bash
-   cd crm-backend
-   ```
-2. Create and activate a Python virtual environment:
-   *   **Windows**:
-       ```powershell
-       python -m venv venv
-       venv\Scripts\activate
-       ```
-   *   **macOS / Linux**:
-       ```bash
-       python -m venv venv
-       source venv/bin/activate
-       ```
-3. Install Python dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-4. Configure your environment variables:
-   Create a `.env` file inside `crm-backend/` containing:
-   ```env
-   DATABASE_URL=sqlite:///./dev.db
-   GROQ_API_KEY=gsk_yourKeyHere
-   CHANNEL_SIMULATOR_URL=http://localhost:8001
-   ```
-5. Launch the FastAPI server:
-   ```bash
-   uvicorn main:app --reload --port 8000
-   ```
-   *Note: On startup, the backend automatically sets up the SQLite schema in `dev.db` and seeds 500 mock customer records and 2,000 orders if the database is blank.*
-
----
-
-### Step 2: Run the Channel Simulator
-
-1. Open a new terminal window and navigate to the simulator directory:
-   ```bash
-   cd channel-simulator
-   ```
-2. Create and activate a Python virtual environment:
-   *   **Windows**:
-       ```powershell
-       python -m venv venv
-       venv\Scripts\activate
-       ```
-   *   **macOS / Linux**:
-       ```bash
-       python -m venv venv
-       source venv/bin/activate
-       ```
-3. Install Python dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-4. Configure your environment variables:
-   Create a `.env` file inside `channel-simulator/` containing:
-   ```env
-   CRM_RECEIPT_URL=http://localhost:8000/receipts/
-   ```
-5. Start the simulator server:
-   ```bash
-   uvicorn main:app --reload --port 8001
-   ```
-
----
-
-### Step 3: Run the React Frontend
-
-1. Open a third terminal window and navigate to the frontend directory:
-   ```bash
-   cd frontend
-   ```
-2. Install npm node modules:
-   ```bash
-   npm install
-   ```
-3. Configure your environment variables:
-   Create a `.env` file inside `frontend/` containing:
-   ```env
-   VITE_API_URL=http://localhost:8000
-   ```
-4. Run the Vite development server:
-   ```bash
-   npm run dev
-   ```
-5. Open your web browser and navigate to the local address displayed (usually [http://localhost:5173](http://localhost:5173)).
-
----
-
-## 📈 Channel Simulator Status Pipeline
-
-When the CRM backend dispatches communications, they are queued up in the simulator. The simulator propagates them asynchronously through a sequence of states, waiting a randomized delay between stages:
-
-```
-[queued] ──(2-5s)──► [delivered] ──(5-15s)──► [opened] ──(3-8s)──► [read] ──(10-30s)──► [clicked] ──(15-45s)──► [purchased]
-   │                      │                    │                  │                   │
-   ├─► (15% Fail)         ├─► (20% Fail)       ├─► (10% Fail)     ├─► (75% Fail)      └─► (70% Fail)
-   ▼                      ▼                    ▼                  ▼                   ▼
-[failed]               [failed]             [failed]           [failed]            [failed]
+### Terminal 1 — CRM Backend
+```bash
+cd crm-backend
+python -m venv venv
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # macOS/Linux
+pip install -r requirements.txt
+python -m uvicorn main:app --reload --port 8000
 ```
 
-At any stage, if a transition fails (based on the transition probabilities), the simulator posts `status: failed` back to the CRM and stops. If it succeeds, it updates the backend with the new status event and queues the next transition step.
-
----
-
-## 📥 Customer Data Ingestion Schema
-
-Marketers can import custom subscriber lists using the CSV upload feature. The CSV file must include the following headers:
-
-```csv
-name,email,phone,city,age,total_spending
-Rahul Sharma,rahul@gmail.com,+919876543210,Mumbai,28,15000
-Priya Singh,priya@yahoo.com,+919876543211,Delhi,32,8500
+### Terminal 2 — Channel Simulator
+```bash
+cd channel-simulator
+python -m venv venv
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # macOS/Linux
+pip install -r requirements.txt
+python -m uvicorn main:app --reload --port 8001
 ```
 
-*   `name`: Customer full name (string)
-*   `email`: Email address (string)
-*   `phone`: Mobile contact number (string)
-*   `city`: City name (string)
-*   `age`: Age (integer)
-*   `total_spending`: Previous checkout value (float)
+### Terminal 3 — Frontend
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
 ---
 
-## 🚀 Production Deployment Guidelines
+## ⚙️ Environment Variables
 
-### 1. Backend & Simulator Deployment (e.g., Render or Heroku)
-*   Deploy each folder (`crm-backend` and `channel-simulator`) as a separate Web Service.
-*   For `crm-backend`, set the start command to: `uvicorn main:app --host 0.0.0.0 --port $PORT`.
-*   Ensure that you set all required Environment Variables in the provider's Dashboard (e.g. `GROQ_API_KEY`, `CHANNEL_SIMULATOR_URL`, and `CRM_RECEIPT_URL` referencing the newly deployed live domains).
-*   For persistent databases in production, configure a PostgreSQL database URL and supply it to `DATABASE_URL` instead of SQLite.
+### `crm-backend/.env`
+```env
+DATABASE_URL=sqlite:///./dev.db
+GROQ_API_KEY=your-groq-key
+CHANNEL_SIMULATOR_URL=http://localhost:8001
+```
 
-### 2. Frontend Deployment (e.g., Vercel, Netlify, or Amplify)
-*   Link the `frontend` folder.
-*   Configure the build command to: `npm run build` and output directory to `dist`.
-*   Set Environment Variable `VITE_API_URL` to point to your live CRM Backend URL.
+### `channel-simulator/.env`
+```env
+CRM_RECEIPT_URL=http://localhost:8000/receipts/
+```
+
+### `frontend/.env.local` (or `frontend/.env`)
+```env
+VITE_API_URL=http://localhost:8000
+```
 
 ---
 
-## ❓ Troubleshooting FAQs
+## 🧠 Key Design Decisions
 
-#### Q: I run uvicorn on `crm-backend` and it throws a database lock error.
-A: This usually happens on Windows if SQLite (`dev.db`) is open in an external database viewer (like DB Browser for SQLite) or if multiple backend processes are running. Make sure you close external connection locks and kill overlapping python processes.
+1.  **Async HTTP over Message Queues (RabbitMQ)**
+    For this scope—handling hundreds of customers and demo traffic—async HTTP with exponential retries manages potential delivery drops correctly. At production scale, we would introduce RabbitMQ with two designated queues: `campaign_sends` and `receipt_events`. We know exactly when to introduce MQ overhead and when to keep it lean.
+2.  **State Machine Validation in `receipts.py`**
+    Every incoming delivery callback status is validated against a sequential `STATUS_ORDER` check. A `CLICKED` callback status cannot arrive or overwrite a database record before `OPENED` has registered. Out-of-order calls caused by network latency are silently discarded.
+3.  **Append-only Event Log**
+    Every status update creates a new immutable row in the `communication_events` table, while the main `communication` record tracks the aggregate current state. This provides a robust audit log and mirrors stream-processing architectures (which can easily scale into Kafka topics).
+4.  **Flexible SQL Database Layer**
+    Uses SQLModel's ORM abstraction enabling zero code changes when switching from local `SQLite` to production-grade `PostgreSQL`—it is managed entirely by changing the `DATABASE_URL` environment variable.
+5.  **Sub-second Inference via Groq**
+    Selected Groq's high-speed completion endpoint over standard OpenAI/Anthropic APIs for free-tier sub-second inference. The agent architecture is model-agnostic; swapping from Llama to Claude Sonnet is a single line change in [campaign_agent.py](file:///C:/Users/LENOVO/Desktop/xeno-crm/crm-backend/services/campaign_agent.py).
 
-#### Q: The AI Campaign Wizard throws a 500 error when clicking "Generate".
-A: Double-check that your `GROQ_API_KEY` is set correctly inside `crm-backend/.env`. If the key is correct, verify that you haven't hit Groq's API rate limits or quota caps.
+---
 
-#### Q: Communications are stuck on "queued" status and never update.
-A: Ensure that the `channel-simulator` is running on port `8001` and that `crm-backend/.env` has `CHANNEL_SIMULATOR_URL` configured to point to it. Additionally, verify that `channel-simulator/.env` points to the correct backend host (default: `http://localhost:8000/receipts/`).
+## 🚀 Deployment
+
+| Service | Platform | Deployment URL |
+| :--- | :--- | :--- |
+| **CRM Backend** | Render | [https://xeno-crm-i41a.onrender.com](https://xeno-crm-i41a.onrender.com) |
+| **Channel Simulator** | Render | [https://xeno-crm-1-0bc8.onrender.com](https://xeno-crm-1-0bc8.onrender.com) |
+| **Frontend** | Vercel | [https://xeno-crm-gules.vercel.app](https://xeno-crm-gules.vercel.app) |
+
+---
+
+## 🔌 API Endpoints Reference
+
+*   `GET  /health`
+*   `GET  /customers/?city=X&min_spending=X&inactive_days=X`
+*   `GET  /customers/count`
+*   `GET  /campaigns/`
+*   `POST /campaigns/`
+*   `GET  /campaigns/{id}`
+*   `POST /campaigns/{id}/launch`
+*   `DELETE /campaigns/{id}`
+*   `POST /communications/send/{campaign_id}`
+*   `POST /receipts/`
+*   `GET  /analytics/`
+*   `GET  /analytics/{campaign_id}`
+*   `POST /ai/create-campaign`
+*   `GET  /ai/insights/{campaign_id}`
+*   `POST /ai/personalize`
+
+---
+*Built for Xeno Engineering Assignment — June 2026*
